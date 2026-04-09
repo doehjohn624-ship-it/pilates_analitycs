@@ -64,15 +64,131 @@ COMPETITORS = [
 
 CHECK_BEFORE_MINUTES = 5
 DATA_FILE = "occupancy_data.csv"
+CONFIG_FILE = "config.json"
 
-# ── Google Sheets (заповніть після налаштування) ──────────
-GOOGLE_CREDENTIALS_FILE = "/root/google_credentials.json"  # шлях до JSON ключа
-GOOGLE_SPREADSHEET_ID   = "17kdfCu_ewPJPJBFdpULm_UIcfAKHw0I5PbZR3qoj21Y"
-GOOGLE_SHEET_LOG        = "Log"            # технічний лог всіх перевірок
-GOOGLE_SHEET_INDIVIDUAL = "Індивідуальні"  # дані по індивідуальних тренуваннях
-GOOGLE_SHEET_GROUP      = "Групові"        # дані по групових тренуваннях
-GOOGLE_SHEET_TABLE      = "Таблиця"        # зведена таблиця студії × години (клієнтів)
+# ── Google Sheets ─────────────────────────────────────────
+GOOGLE_CREDENTIALS_FILE = "google_credentials.json"
+GOOGLE_SPREADSHEET_ID   = ""
+GOOGLE_SHEET_LOG        = "Log"
+GOOGLE_SHEET_INDIVIDUAL = "Індивідуальні"
+GOOGLE_SHEET_GROUP      = "Групові"
+GOOGLE_SHEET_TABLE      = "Таблиця"
 # ─────────────────────────────────────────────────────────
+
+
+# ========================
+# ПЕРШИЙ ЗАПУСК / КОНФІГ
+# ========================
+
+def _extract_spreadsheet_id(url_or_id: str) -> str:
+    """Витягує ID таблиці з повного URL або повертає як є."""
+    import re
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
+    return m.group(1) if m else url_or_id.strip()
+
+
+def load_config():
+    """Завантажити конфіг з config.json (якщо є)."""
+    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE
+    if not os.path.exists(CONFIG_FILE):
+        return False
+    with open(CONFIG_FILE, encoding="utf-8") as f:
+        cfg = json.load(f)
+    GOOGLE_SPREADSHEET_ID   = cfg.get("spreadsheet_id", "")
+    GOOGLE_CREDENTIALS_FILE = cfg.get("credentials_file", "google_credentials.json")
+    return True
+
+
+def save_config():
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "spreadsheet_id":   GOOGLE_SPREADSHEET_ID,
+            "credentials_file": GOOGLE_CREDENTIALS_FILE,
+        }, f, ensure_ascii=False, indent=2)
+
+
+def setup():
+    """Інтерактивне налаштування при першому запуску."""
+    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE
+
+    print("=" * 55)
+    print("  ПЕРШИЙ ЗАПУСК — налаштування")
+    print("=" * 55)
+
+    # ── 1. Google Таблиця ─────────────────────────────────
+    print("\nКрок 1/2 — Google Таблиця")
+    print("Відкрийте таблицю в браузері та скопіюйте посилання.")
+    while True:
+        raw = input("  Вставте посилання (або ID): ").strip()
+        if not raw:
+            print("  ! Не може бути порожнім, спробуйте ще раз.")
+            continue
+        GOOGLE_SPREADSHEET_ID = _extract_spreadsheet_id(raw)
+        print(f"  ✓ ID таблиці: {GOOGLE_SPREADSHEET_ID}")
+        break
+
+    # ── 2. Файл credentials ───────────────────────────────
+    print("\nКрок 2/2 — Файл Google credentials")
+    print("Де знаходиться ваш google_credentials.json?")
+    print(f"  [Enter] — залишити поточний шлях: {GOOGLE_CREDENTIALS_FILE}")
+    raw = input("  Шлях до файлу: ").strip()
+    if raw:
+        GOOGLE_CREDENTIALS_FILE = raw
+
+    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+        print()
+        print("  ⚠️  Файл НЕ знайдено!")
+        print("  Щоб отримати credentials:")
+        print("  1. Зайдіть на https://console.cloud.google.com")
+        print("  2. Створіть проєкт → увімкніть Google Sheets API")
+        print("  3. IAM → Сервісні акаунти → Створити → Завантажити JSON")
+        print("  4. Надайте доступ до таблиці цьому сервісному акаунту (редактор)")
+        print(f"  5. Покладіть файл за шляхом: {GOOGLE_CREDENTIALS_FILE}")
+        print()
+        input("  Натисніть Enter коли файл буде готовий...")
+        if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+            print("  ! Файл все ще не знайдено. Продовжуємо без Google Sheets.")
+    else:
+        print(f"  ✓ Файл знайдено: {GOOGLE_CREDENTIALS_FILE}")
+
+    save_config()
+    print("\n  Конфіг збережено у config.json")
+
+    # ── 3. Cron ───────────────────────────────────────────
+    print()
+    print("Крок 3/3 — Автозапуск щодня о 06:00")
+    print("  Налаштувати cron щоб скрипт запускався автоматично?")
+    answer = input("  [т/н]: ").strip().lower()
+    if answer in ("т", "y", "yes", "так", "д", "д"):
+        _setup_cron()
+    else:
+        print("  Пропущено. Запускайте вручну: python3 competitor_occupancy.py")
+
+    print("=" * 55 + "\n")
+
+
+def _setup_cron():
+    """Додати cron-завдання на 06:00 щодня."""
+    import subprocess
+    script_path = os.path.abspath(__file__)
+    script_dir  = os.path.dirname(script_path)
+    cron_line   = f"0 6 * * * cd {script_dir} && python3 {script_path} >> {script_dir}/occupancy.log 2>&1"
+
+    # Читаємо поточний crontab
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    current = result.stdout if result.returncode == 0 else ""
+
+    if cron_line in current:
+        print("  ✓ Cron вже налаштовано.")
+        return
+
+    new_crontab = current.rstrip("\n") + "\n" + cron_line + "\n"
+    proc = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
+    if proc.returncode == 0:
+        print("  ✓ Cron налаштовано — скрипт запускатиметься щодня о 06:00")
+    else:
+        print(f"  ! Помилка налаштування cron: {proc.stderr}")
+        print(f"  Додайте вручну: {cron_line}")
 
 # ========================
 # API
@@ -743,4 +859,6 @@ def run_today():
 
 
 if __name__ == "__main__":
+    if not load_config():
+        setup()
     run_today()

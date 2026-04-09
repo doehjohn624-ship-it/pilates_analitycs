@@ -1,4 +1,5 @@
 google_credentials.json
+config.json
 occupancy_data.csv
 occupancy.log
 __pycache__/
