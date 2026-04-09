@@ -1,0 +1,6 @@
+google_credentials.json
+occupancy_data.csv
+occupancy.log
+__pycache__/
+*.pyc
+.env
