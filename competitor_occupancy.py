@@ -169,27 +169,38 @@ def setup():
 
 
 def _setup_cron():
-    """Додати cron-завдання на 06:00 щодня."""
+    """Додати два cron-завдання:
+    1. Щодня о 06:00 — повний запуск моніторингу
+    2. Щогодини       — оновлення індивідуальних слотів на 7 днів
+    """
     import subprocess
     script_path = os.path.abspath(__file__)
     script_dir  = os.path.dirname(script_path)
-    cron_line   = f"0 6 * * * cd {script_dir} && python3 {script_path} >> {script_dir}/occupancy.log 2>&1"
+    log         = f"{script_dir}/occupancy.log"
 
-    # Читаємо поточний crontab
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    daily_cron  = f"0 6 * * * cd {script_dir} && python3 {script_path} >> {log} 2>&1"
+    hourly_cron = (
+        f"0 * * * * cd {script_dir} && python3 -c "
+        f"\"import competitor_occupancy as m; m.load_config(); m.gs_update_individual_week()\" "
+        f">> {log} 2>&1"
+    )
+
+    result  = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     current = result.stdout if result.returncode == 0 else ""
 
-    if cron_line in current:
+    to_add = [l for l in [daily_cron, hourly_cron] if l not in current]
+    if not to_add:
         print("  ✓ Cron вже налаштовано.")
         return
 
-    new_crontab = current.rstrip("\n") + "\n" + cron_line + "\n"
+    new_crontab = current.rstrip("\n") + "\n" + "\n".join(to_add) + "\n"
     proc = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
     if proc.returncode == 0:
-        print("  ✓ Cron налаштовано — скрипт запускатиметься щодня о 06:00")
+        print("  ✓ Cron налаштовано:")
+        print("    • щодня о 06:00 — повний моніторинг")
+        print("    • щогодини      — оновлення індивідуальних слотів (7 днів)")
     else:
-        print(f"  ! Помилка налаштування cron: {proc.stderr}")
-        print(f"  Додайте вручну: {cron_line}")
+        print(f"  ! Помилка: {proc.stderr}")
 
 # ========================
 # API
@@ -400,98 +411,153 @@ def _collect_today_events():
 
 
 # ========================
-# BASELINE ІНДИВІДУАЛЬНИХ
+# СКАНУВАННЯ ІНДИВІДУАЛЬНИХ НА 7 ДНІВ
 # ========================
 
-def scan_week_baseline():
-    """Сканує всі слоти тренерів на поточний тиждень (сьогодні + 6 днів).
-    Зберігає у BASELINE_FILE: {студія: {тренер: {дата: кількість_слотів}}}.
-    Запускається раз на тиждень (щопонеділка) або якщо файл відсутній.
+def _fetch_individual_week() -> dict:
+    """Отримує поточну кількість вільних слотів для всіх тренерів на 7 днів вперед.
+    Повертає {(студія, тренер, дата): free_count | None}.
+    None = не працює, 0 = повністю зайнятий.
     """
     today = date.today()
     week_dates = [(today + timedelta(days=i)).isoformat() for i in range(7)]
-    baseline = {}
+    result = {}
 
-    print("  [Baseline] Сканування тижня для індивідуальних...")
     for comp in COMPETITORS:
         name = comp["name"]
         base = comp["base_url"]
         cid  = comp["company_id"]
         tok  = comp["token"]
-        baseline[name] = {}
 
         try:
             staff_list = api_get(f"{base}/api/v1/book_staff/{cid}?without_seances=1", tok)
             if not isinstance(staff_list, list):
                 staff_list = staff_list.get("data", [])
         except Exception as e:
-            print(f"  [Baseline] {name}: помилка staff — {e}")
+            print(f"  [Індив] {name}: помилка staff — {e}")
             continue
 
         for s in staff_list:
             trainer = s["name"]
-            baseline[name][trainer] = {}
             try:
                 dates_data = api_get(
                     f"{base}/api/v1/book_dates/{cid}?staff_id={s['id']}", tok
                 )
                 working = set(dates_data.get("working_dates", []))
                 booking = set(dates_data.get("booking_dates", []))
-            except Exception as e:
-                print(f"  [Baseline] {name}/{trainer}: помилка дат — {e}")
-                continue
+            except Exception:
+                working, booking = set(), set()
 
             for d in week_dates:
+                key = (name, trainer, d)
                 if d not in working:
-                    baseline[name][trainer][d] = None  # не працює
-                    continue
-                if d not in booking:
-                    baseline[name][trainer][d] = 0     # повністю зайнятий
-                    continue
-                try:
-                    slots = api_get(
-                        f"{base}/api/v1/book_times/{cid}/{s['id']}/{d}", tok
-                    )
-                    if not isinstance(slots, list):
-                        slots = []
-                    baseline[name][trainer][d] = len(slots)
-                except Exception as e:
-                    print(f"  [Baseline] {name}/{trainer}/{d}: помилка слотів — {e}")
-                    baseline[name][trainer][d] = None
+                    result[key] = None        # не працює
+                elif d not in booking:
+                    result[key] = 0           # повністю зайнятий
+                else:
+                    try:
+                        slots = api_get(
+                            f"{base}/api/v1/book_times/{cid}/{s['id']}/{d}", tok
+                        )
+                        result[key] = len(slots) if isinstance(slots, list) else 0
+                    except Exception:
+                        result[key] = None
 
-        print(f"  [Baseline] {name}: {len(baseline[name])} тренерів")
-
-    data = {
-        "week_start": today.isoformat(),
-        "scanned_at": datetime.now().isoformat(timespec="minutes"),
-        "data": baseline,
-    }
-    with open(BASELINE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"  [Baseline] Збережено у {BASELINE_FILE}")
-    return data
+    return result
 
 
-def load_baseline() -> dict:
-    """Завантажити baseline з файлу. Повертає пустий dict якщо файл відсутній."""
-    if not os.path.exists(BASELINE_FILE):
-        return {}
-    with open(BASELINE_FILE, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("data", {})
+def gs_update_individual_week():
+    """Оновлює аркуш «Індивідуальні» для всіх тренерів на 7 днів вперед.
 
+    Логіка:
+    - Перший скан дня → записує рядок, initial = поточна кількість вільних
+    - Наступні скани → оновлює вільних/зайнято, initial не змінюється
+    - Рядки минулих днів залишаються незмінними
+    """
+    gc = get_gs_client()
+    if not gc:
+        return
+    try:
+        current = _fetch_individual_week()
 
-def baseline_is_stale() -> bool:
-    """Чи потрібно оновити baseline (немає файлу або файл зі старого тижня)."""
-    if not os.path.exists(BASELINE_FILE):
-        return True
-    with open(BASELINE_FILE, encoding="utf-8") as f:
-        data = json.load(f)
-    week_start = data.get("week_start", "")
-    # Вважаємо тиждень з понеділка; оновлюємо якщо week_start < поточний понеділок
-    today = date.today()
-    monday = (today - timedelta(days=today.weekday())).isoformat()
-    return week_start < monday
+        sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
+        ws = _ensure_worksheet(sh, GOOGLE_SHEET_INDIVIDUAL)
+        all_rows = ws.get_all_values()
+
+        if not all_rows:
+            ws.append_row(IND_HEADERS, value_input_option="RAW")
+            all_rows = [IND_HEADERS]
+
+        # Індекс існуючих рядків: (дата, студія, тренер) -> (номер рядка, initial_slots)
+        header = all_rows[0]
+        try:
+            ci = {c: header.index(c) for c in
+                  ["дата", "студія", "тренер", "слотів_на_початку_тижня"]}
+        except ValueError:
+            ci = {"дата": 0, "студія": 2, "тренер": 3, "слотів_на_початку_тижня": 4}
+
+        row_map = {}  # (дата, студія, тренер) -> (row_num, initial_val)
+        for i, row in enumerate(all_rows[1:], start=2):
+            if len(row) > ci["тренер"]:
+                k = (row[ci["дата"]], row[ci["студія"]], row[ci["тренер"]])
+                init_val = row[ci["слотів_на_початку_тижня"]] if ci["слотів_на_початку_тижня"] < len(row) else ""
+                row_map[k] = (i, init_val)
+
+        batch_updates = []   # [{range: "A5", values: [[...]]}]
+        rows_to_append = []  # рядки для дозапису
+
+        for (studio, trainer, d_str), free in current.items():
+            d_obj = date.fromisoformat(d_str)
+            dow   = DAY_UK[d_obj.weekday()]
+            key   = (d_str, studio, trainer)
+            existing = row_map.get(key)
+
+            if free is None:
+                initial, booked, occ, status = "", "", "", "не працює"
+            else:
+                if existing:
+                    try:
+                        initial = int(existing[1])
+                    except (ValueError, TypeError):
+                        initial = free
+                else:
+                    initial = free  # перший скан — фіксуємо
+
+                booked = initial - free if isinstance(initial, int) else ""
+                if isinstance(initial, int) and initial > 0:
+                    occ = round(booked / initial * 100)
+                elif free == 0:
+                    occ = 100
+                else:
+                    occ = 0
+
+                if free == 0:
+                    status = "повністю зайнятий"
+                elif booked == 0:
+                    status = "немає записів"
+                else:
+                    status = "є вільні слоти"
+
+            row_data = [d_str, dow, studio, trainer, initial, free, booked, occ, status]
+
+            if existing:
+                batch_updates.append({
+                    "range": f"A{existing[0]}",
+                    "values": [row_data],
+                })
+            else:
+                rows_to_append.append(row_data)
+                row_map[key] = (len(all_rows) + len(rows_to_append), initial)
+
+        # Один batch update замість N окремих запитів
+        if batch_updates:
+            ws.batch_update(batch_updates, value_input_option="RAW")
+        if rows_to_append:
+            ws.append_rows(rows_to_append, value_input_option="RAW")
+
+        print(f"  [GSheets] Індивідуальні (7 днів): оновлено {len(batch_updates)}, додано {len(rows_to_append)} рядків")
+    except Exception as e:
+        print(f"  [GSheets] Помилка оновлення Індивідуальні: {e}")
 
 
 DAY_UK = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
@@ -572,69 +638,8 @@ def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list
 
 
 def gs_update_individual():
-    """Аркуш «Індивідуальні»: один рядок = один тренер на один день.
-    Порівнює поточні вільні слоти з baseline → рахує зайнятих клієнтів.
-    """
-    gc = get_gs_client()
-    if not gc:
-        return
-    try:
-        events   = _collect_today_events()
-        baseline = load_baseline()
-        today    = date.today().isoformat()
-        dow      = DAY_UK[date.today().weekday()]
-
-        new_rows = []
-        for e in events:
-            if e["тип"] != "individual":
-                continue
-
-            studio  = e["студія"]
-            trainer = e["тренер"]
-            free    = e["вільних"] if e["вільних"] != "" else 0
-
-            # Baseline: скільки слотів було на початку тижня
-            baseline_count = (baseline
-                              .get(studio, {})
-                              .get(trainer, {})
-                              .get(today))
-
-            if baseline_count is None:
-                # Немає baseline — не можемо порахувати зайнятих
-                booked = ""
-                total  = ""
-                occ    = ""
-                status = "не працює"
-            elif baseline_count == 0:
-                # На початку тижня вже всі слоти були зайняті
-                booked = ""
-                total  = 0
-                occ    = 100
-                status = "повністю зайнятий (весь тиждень)"
-            else:
-                total  = baseline_count
-                booked = total - free
-                occ    = round(booked / total * 100) if total else 0
-                if free == 0:
-                    status = "повністю зайнятий"
-                elif booked == 0:
-                    status = "немає записів"
-                else:
-                    status = "є вільні слоти"
-
-            new_rows.append([
-                today, dow, studio, trainer,
-                total, free, booked, occ, status,
-            ])
-
-        sh  = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
-        ws  = _ensure_worksheet(sh, GOOGLE_SHEET_INDIVIDUAL)
-        all_rows = ws.get_all_values()
-        upd, app = _ws_upsert(ws, all_rows, IND_HEADERS,
-                              ["дата", "студія", "тренер"], new_rows)
-        print(f"  [GSheets] Індивідуальні: оновлено {upd}, додано {app} рядків")
-    except Exception as e:
-        print(f"  [GSheets] Помилка оновлення Індивідуальні: {e}")
+    """Аліас для зворотної сумісності — викликає gs_update_individual_week()."""
+    gs_update_individual_week()
 
 
 def gs_update_group():
@@ -1011,10 +1016,6 @@ def run_today():
     print(f"\n{'='*55}")
     print(f"Заплановано {len(all_threads)} перевірок. Очікую...")
     print(f"Дані зберігаються у: {DATA_FILE}")
-    # Оновити baseline на початку тижня або якщо файл відсутній
-    if baseline_is_stale():
-        scan_week_baseline()
-
     if GOOGLE_SPREADSHEET_ID:
         print(f"Google Sheets: увімкнено")
         gs_init_log()           # підготувати аркуш Log
