@@ -405,102 +405,126 @@ def _ensure_worksheet(sh, title: str, rows: int = 2000, cols: int = 20):
     return sh.worksheet(title)
 
 
-def gs_update_individual():
-    """Аркуш «Індивідуальні»: один рядок = один тренер на сьогодні.
+IND_HEADERS = [
+    "дата", "день_тижня", "студія", "тренер",
+    "статус", "вільних_слотів", "завантаженість_%",
+]
+GRP_HEADERS = [
+    "дата", "день_тижня", "студія", "час", "година",
+    "подія", "тренер", "місць_всього", "клієнтів",
+    "вільних", "завантаженість_%", "статус",
+]
 
-    Колонки (аналітика-дружні):
-        дата | день_тижня | студія | тренер | статус
-        вільних_слотів | завантаженість_%
+
+def _build_row_index(all_rows: list, key_cols: list) -> dict:
+    """Побудувати словник (key_tuple -> номер рядка 1-based) по існуючих даних.
+    Перший рядок вважається заголовком і пропускається."""
+    if not all_rows:
+        return {}
+    header = all_rows[0]
+    try:
+        key_indices = [header.index(c) for c in key_cols]
+    except ValueError:
+        return {}
+    index = {}
+    for i, row in enumerate(all_rows[1:], start=2):
+        key = tuple(row[j] if j < len(row) else "" for j in key_indices)
+        index[key] = i
+    return index
+
+
+def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list):
+    """Оновити існуючі рядки або дозаписати нові.
+    new_rows — список списків, перший елемент відповідає headers[0] і т.д."""
+    if not all_rows:
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+        all_rows = [headers]
+
+    row_index = _build_row_index(all_rows, key_cols)
+    key_col_positions = [headers.index(c) for c in key_cols]
+
+    updated = 0
+    appended = 0
+    for row_data in new_rows:
+        key = tuple(row_data[i] for i in key_col_positions)
+        if key in row_index:
+            row_num = row_index[key]
+            ws.update(f"A{row_num}", [row_data], value_input_option="USER_ENTERED")
+            updated += 1
+        else:
+            ws.append_row(row_data, value_input_option="USER_ENTERED")
+            appended += 1
+    return updated, appended
+
+
+def gs_update_individual():
+    """Аркуш «Індивідуальні»: один рядок = один тренер на один день.
+    Оновлює існуючий рядок якщо є, інакше дозаписує — дані за попередні дні не зникають.
     """
     gc = get_gs_client()
     if not gc:
         return
     try:
         events = _collect_today_events()
-        today_date = date.today()
-        dow = DAY_UK[today_date.weekday()]
+        dow = DAY_UK[date.today().weekday()]
 
-        HEADERS = [
-            "дата", "день_тижня", "студія", "тренер",
-            "статус", "вільних_слотів", "завантаженість_%",
-        ]
-        rows = [HEADERS]
+        new_rows = []
         for e in events:
             if e["тип"] != "individual":
                 continue
             free = e["вільних"] if e["вільних"] != "" else 0
-            occ  = e["завантаженість_%"]
-            if occ == "":
-                occ = 0
-
+            occ  = e["завантаженість_%"] if e["завантаженість_%"] != "" else 0
             if e["місць_всього"] == "" and free == 0 and occ == 0:
                 status = "не працює"
             elif occ == 100:
                 status = "повністю зайнятий"
             else:
                 status = "є вільні слоти"
+            new_rows.append([e["дата"], dow, e["студія"], e["тренер"], status, free, occ])
 
-            rows.append([
-                e["дата"], dow, e["студія"], e["тренер"],
-                status, free, occ,
-            ])
-
-        sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
-        ws = _ensure_worksheet(sh, GOOGLE_SHEET_INDIVIDUAL)
-        ws.clear()
-        ws.update(rows, value_input_option="USER_ENTERED")
-        print(f"  [GSheets] Індивідуальні оновлено ({len(rows)-1} рядків)")
+        sh  = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
+        ws  = _ensure_worksheet(sh, GOOGLE_SHEET_INDIVIDUAL)
+        all_rows = ws.get_all_values()
+        upd, app = _ws_upsert(ws, all_rows, IND_HEADERS,
+                              ["дата", "студія", "тренер"], new_rows)
+        print(f"  [GSheets] Індивідуальні: оновлено {upd}, додано {app} рядків")
     except Exception as e:
         print(f"  [GSheets] Помилка оновлення Індивідуальні: {e}")
 
 
 def gs_update_group():
-    """Аркуш «Групові»: один рядок = одна групова подія.
-
-    Колонки (аналітика-дружні):
-        дата | день_тижня | студія | час | година
-        подія | тренер | місць_всього | клієнтів
-        вільних | завантаженість_% | статус
+    """Аркуш «Групові»: один рядок = одна подія на один день.
+    Оновлює існуючий рядок якщо є, інакше дозаписує — дані за попередні дні не зникають.
     """
     gc = get_gs_client()
     if not gc:
         return
     try:
         events = _collect_today_events()
-        today_date = date.today()
-        dow = DAY_UK[today_date.weekday()]
+        dow = DAY_UK[date.today().weekday()]
 
-        HEADERS = [
-            "дата", "день_тижня", "студія", "час", "година",
-            "подія", "тренер", "місць_всього", "клієнтів",
-            "вільних", "завантаженість_%", "статус",
-        ]
-        rows = [HEADERS]
+        new_rows = []
         for e in events:
             if e["тип"] != "group":
                 continue
-            # Числова година для угрупування/сортування
             try:
                 hour = int(e["час"].split(":")[0])
             except (ValueError, AttributeError):
                 hour = ""
-
-            cap = e["місць_всього"]
-            rec = e["клієнтів"]
-            occ = e["завантаженість_%"]
+            occ    = e["завантаженість_%"]
             status = "повний зал" if occ == 100 else "є місця"
-
-            rows.append([
+            new_rows.append([
                 e["дата"], dow, e["студія"], e["час"], hour,
-                e["подія"], e["тренер"], cap, rec,
+                e["подія"], e["тренер"], e["місць_всього"], e["клієнтів"],
                 e["вільних"], occ, status,
             ])
 
-        sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
-        ws = _ensure_worksheet(sh, GOOGLE_SHEET_GROUP)
-        ws.clear()
-        ws.update(rows, value_input_option="USER_ENTERED")
-        print(f"  [GSheets] Групові оновлено ({len(rows)-1} рядків)")
+        sh  = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
+        ws  = _ensure_worksheet(sh, GOOGLE_SHEET_GROUP)
+        all_rows = ws.get_all_values()
+        upd, app = _ws_upsert(ws, all_rows, GRP_HEADERS,
+                              ["дата", "студія", "час", "подія"], new_rows)
+        print(f"  [GSheets] Групові: оновлено {upd}, додано {app} рядків")
     except Exception as e:
         print(f"  [GSheets] Помилка оновлення Групові: {e}")
 
