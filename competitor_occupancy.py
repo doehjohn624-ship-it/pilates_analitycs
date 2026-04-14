@@ -332,10 +332,14 @@ def _collect_today_events():
         for e in (ev.get("data", []) if ev.get("success") else []):
             cap = e["capacity"]
             rec = e["records_count"]
+            raw_time = e["date"][11:16]           # "09:00"
+            norm_time = raw_time.lstrip("0") or "0:00"  # "9:00" — без ведучого нуля
+            if norm_time.startswith(":"):         # "09:00" → lstrip → ":00" edge case
+                norm_time = "0" + norm_time
             events.append({
                 "дата":             today,
                 "студія":           name,
-                "час":              e["date"][11:16],
+                "час":              norm_time,
                 "тип":              "group",
                 "подія":            e.get("service", {}).get("title", ""),
                 "тренер":           e.get("staff", {}).get("name", ""),
@@ -428,16 +432,29 @@ def _build_row_index(all_rows: list, key_cols: list) -> dict:
         return {}
     index = {}
     for i, row in enumerate(all_rows[1:], start=2):
-        key = tuple(row[j] if j < len(row) else "" for j in key_indices)
+        key = tuple(_norm_key_val(row[j]) if j < len(row) else "" for j in key_indices)
         index[key] = i
     return index
+
+
+def _norm_key_val(v: str) -> str:
+    """Нормалізує значення для порівняння ключів.
+    Видаляє ведучі нулі з часу: '09:00' і '9:00' → однакові."""
+    v = str(v).strip()
+    # Часовий формат з AM/PM: "9:00:00 AM" → "9:00"
+    if v.upper().endswith(("AM", "PM")):
+        v = v.split()[0][:5]
+    # Ведучий нуль години: "09:00" → "9:00"
+    if len(v) >= 4 and v[0] == "0" and v[1] != ":":
+        v = v[1:]
+    return v
 
 
 def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list):
     """Оновити існуючі рядки або дозаписати нові.
     new_rows — список списків, перший елемент відповідає headers[0] і т.д."""
     if not all_rows:
-        ws.append_row(headers, value_input_option="USER_ENTERED")
+        ws.append_row(headers, value_input_option="RAW")
         all_rows = [headers]
 
     row_index = _build_row_index(all_rows, key_cols)
@@ -446,13 +463,13 @@ def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list
     updated = 0
     appended = 0
     for row_data in new_rows:
-        key = tuple(row_data[i] for i in key_col_positions)
+        key = tuple(_norm_key_val(row_data[i]) for i in key_col_positions)
         if key in row_index:
             row_num = row_index[key]
-            ws.update(f"A{row_num}", [row_data], value_input_option="USER_ENTERED")
+            ws.update(f"A{row_num}", [row_data], value_input_option="RAW")
             updated += 1
         else:
-            ws.append_row(row_data, value_input_option="USER_ENTERED")
+            ws.append_row(row_data, value_input_option="RAW")
             appended += 1
     return updated, appended
 
