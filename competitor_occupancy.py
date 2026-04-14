@@ -602,15 +602,46 @@ def _build_row_index(all_rows: list, key_cols: list) -> dict:
 
 def _norm_key_val(v: str) -> str:
     """Нормалізує значення для порівняння ключів.
-    Видаляє ведучі нулі з часу: '09:00' і '9:00' → однакові."""
+    Всі варіанти часу '09:00', '9:00', '9:00:00', '9:00:00 AM' → '9:00'."""
     v = str(v).strip()
-    # Часовий формат з AM/PM: "9:00:00 AM" → "9:00"
+    # "9:00:00 AM" / "9:00:00 PM" → беремо тільки HH:MM
     if v.upper().endswith(("AM", "PM")):
-        v = v.split()[0][:5]
-    # Ведучий нуль години: "09:00" → "9:00"
+        v = v.split()[0]
+    # "9:00:00" → "9:00" (відкидаємо секунди)
+    parts = v.split(":")
+    if len(parts) == 3:
+        v = ":".join(parts[:2])
+    # "09:00" → "9:00" (прибираємо ведучий нуль години)
     if len(v) >= 4 and v[0] == "0" and v[1] != ":":
         v = v[1:]
     return v
+
+
+def ws_dedup(ws, key_cols: list):
+    """Видаляє дублікати з worksheet. Залишає перший рядок для кожного ключа."""
+    all_rows = ws.get_all_values()
+    if len(all_rows) < 2:
+        return 0
+    header = all_rows[0]
+    try:
+        key_indices = [header.index(c) for c in key_cols]
+    except ValueError:
+        return 0
+
+    seen = set()
+    rows_to_delete = []
+    for i, row in enumerate(all_rows[1:], start=2):
+        key = tuple(_norm_key_val(row[j]) if j < len(row) else "" for j in key_indices)
+        if key in seen:
+            rows_to_delete.append(i)
+        else:
+            seen.add(key)
+
+    # Видаляємо знизу вгору щоб не зсувались номери рядків
+    for row_num in sorted(rows_to_delete, reverse=True):
+        ws.delete_rows(row_num)
+
+    return len(rows_to_delete)
 
 
 def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list):
