@@ -74,6 +74,8 @@ GOOGLE_SHEET_LOG        = "Log"
 GOOGLE_SHEET_INDIVIDUAL = "Індивідуальні"
 GOOGLE_SHEET_GROUP      = "Групові"
 GOOGLE_SHEET_TABLE      = "Таблиця"
+GOOGLE_SHEET_STATUS     = "Статус"
+STATUS_MAX_ROWS         = 30  # скільки останніх оновлень показувати
 # ─────────────────────────────────────────────────────────
 
 
@@ -90,13 +92,20 @@ def _extract_spreadsheet_id(url_or_id: str) -> str:
 
 def load_config():
     """Завантажити конфіг з config.json (якщо є)."""
-    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE
+    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE, COMPETITORS
     if not os.path.exists(CONFIG_FILE):
         return False
     with open(CONFIG_FILE, encoding="utf-8") as f:
         cfg = json.load(f)
     GOOGLE_SPREADSHEET_ID   = cfg.get("spreadsheet_id", "")
     GOOGLE_CREDENTIALS_FILE = cfg.get("credentials_file", "google_credentials.json")
+    saved = cfg.get("competitors")
+    if saved:
+        COMPETITORS = saved
+        # Переконатись що токен прописаний у кожного
+        for c in COMPETITORS:
+            if not c.get("token"):
+                c["token"] = TOKEN
     return True
 
 
@@ -105,6 +114,10 @@ def save_config():
         json.dump({
             "spreadsheet_id":   GOOGLE_SPREADSHEET_ID,
             "credentials_file": GOOGLE_CREDENTIALS_FILE,
+            "competitors": [
+                {"name": c["name"], "company_id": c["company_id"], "base_url": c["base_url"]}
+                for c in COMPETITORS
+            ],
         }, f, ensure_ascii=False, indent=2)
 
 
@@ -117,7 +130,7 @@ def setup():
     print("=" * 55)
 
     # ── 1. Google Таблиця ─────────────────────────────────
-    print("\nКрок 1/2 — Google Таблиця")
+    print("\nКрок 1/4 — Google Таблиця")
     print("Відкрийте таблицю в браузері та скопіюйте посилання.")
     while True:
         raw = input("  Вставте посилання (або ID): ").strip()
@@ -129,7 +142,7 @@ def setup():
         break
 
     # ── 2. Файл credentials ───────────────────────────────
-    print("\nКрок 2/2 — Файл Google credentials")
+    print("\nКрок 2/4 — Файл Google credentials")
     print("Де знаходиться ваш google_credentials.json?")
     print(f"  [Enter] — залишити поточний шлях: {GOOGLE_CREDENTIALS_FILE}")
     raw = input("  Шлях до файлу: ").strip()
@@ -152,15 +165,57 @@ def setup():
     else:
         print(f"  ✓ Файл знайдено: {GOOGLE_CREDENTIALS_FILE}")
 
+    # ── 3. Конкуренти ────────────────────────────────────
+    print("\nКрок 3/4 — Список конкурентів")
+    print(f"  Зараз у списку {len(COMPETITORS)} студій:")
+    for i, c in enumerate(COMPETITORS, 1):
+        print(f"    {i}. {c['name']}  (company_id={c['company_id']})")
+    print()
+    print("  Що зробити?")
+    print("  [Enter] — залишити як є")
+    print("  d <номер> — видалити (наприклад: d 2)")
+    print("  a — додати нову студію")
+    print("  q — завершити редагування")
+    while True:
+        cmd = input("  > ").strip().lower()
+        if cmd in ("", "q"):
+            break
+        elif cmd.startswith("d "):
+            try:
+                idx = int(cmd[2:]) - 1
+                removed = COMPETITORS.pop(idx)
+                print(f"  ✓ Видалено: {removed['name']}")
+                for i, c in enumerate(COMPETITORS, 1):
+                    print(f"    {i}. {c['name']}")
+            except (ValueError, IndexError):
+                print("  ! Невірний номер")
+        elif cmd == "a":
+            name = input("  Назва студії: ").strip()
+            if not name:
+                print("  ! Назва не може бути порожньою")
+                continue
+            cid = input("  company_id (число): ").strip()
+            if not cid.isdigit():
+                print("  ! company_id має бути числом")
+                continue
+            base_url = input("  base_url (напр. https://n1234567.alteg.io): ").strip()
+            if not base_url:
+                print("  ! base_url не може бути порожнім")
+                continue
+            COMPETITORS.append({"name": name, "company_id": int(cid), "base_url": base_url, "token": TOKEN})
+            print(f"  ✓ Додано: {name}")
+        else:
+            print("  ! Невідома команда. Введіть d <номер>, a або Enter/q")
+
     save_config()
     print("\n  Конфіг збережено у config.json")
 
-    # ── 3. Cron ───────────────────────────────────────────
+    # ── 4. Cron ───────────────────────────────────────────
     print()
-    print("Крок 3/3 — Автозапуск щодня о 06:00")
+    print("Крок 4/4 — Автозапуск щодня о 06:00")
     print("  Налаштувати cron щоб скрипт запускався автоматично?")
-    answer = input("  [т/н]: ").strip().lower()
-    if answer in ("т", "y", "yes", "так", "д", "д"):
+    answer = input("  [y/n]: ").strip().lower()
+    if answer in ("y", "yes"):
         _setup_cron()
     else:
         print("  Пропущено. Запускайте вручну: python3 competitor_occupancy.py")
@@ -301,7 +356,7 @@ def gs_init_log():
         return
     try:
         sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
-        _gs_log_ws = sh.worksheet(GOOGLE_SHEET_LOG)
+        _gs_log_ws = _ensure_worksheet(sh, GOOGLE_SHEET_LOG)
         _gs_log_ws.clear()
         _gs_log_ws.append_row(FIELDNAMES)
         _gs_log_ready = True
@@ -322,6 +377,106 @@ def gs_append_log(row: dict):
         )
     except Exception as e:
         print(f"  [GSheets] Помилка запису в Log: {e}")
+    gs_update_status(row)
+
+
+_gs_status_rows = []   # буфер останніх оновлень (в пам'яті)
+_gs_prev_state  = {}   # попередній стан: event_key -> (було_рядок, records_count, places_left)
+
+STATUS_HEADERS = [
+    "оновлено", "студія", "тип", "тренер / подія", "час",
+    "було", "стало", "зміна",
+]
+
+
+def _format_state(row: dict) -> str:
+    """Форматує стан події для колонок «було» / «стало»."""
+    etype = row.get("event_type", "")
+    if etype == "heartbeat":
+        return row.get("event_name", "")
+    if etype == "individual":
+        return row.get("status", "")   # «вільний» / «зайнятий»
+    # group
+    rec = row.get("records_count", "")
+    cap = row.get("capacity", "")
+    pct = row.get("occupancy_pct", "")
+    if rec != "" and cap != "":
+        return f"{rec}/{cap} ({pct}%)"
+    return row.get("status", "")
+
+
+def gs_update_status(row: dict):
+    """Оновити аркуш Статус: показати останні STATUS_MAX_ROWS змін у форматі Було → Стало."""
+    global _gs_status_rows, _gs_prev_state
+    gc = get_gs_client()
+    if not gc or not GOOGLE_SPREADSHEET_ID:
+        return
+    try:
+        etype = row.get("event_type", "")
+        staff = row.get("staff_name", "")
+        event = row.get("event_name", "")
+        label = f"{event} ({staff})" if event and staff else (event or staff)
+
+        state_now = _format_state(row)
+
+        if etype == "heartbeat":
+            було = ""
+            стало = state_now
+            зміна = ""
+        else:
+            event_key = (
+                row.get("competitor", ""),
+                etype,
+                row.get("event_id", ""),
+                row.get("staff_name", ""),
+                row.get("date", ""),
+                row.get("slot_time", ""),
+            )
+            prev = _gs_prev_state.get(event_key)
+            було  = prev if prev is not None else "—"
+            стало = state_now
+            _gs_prev_state[event_key] = state_now
+
+            # Зміна: різниця зайнятих місць (тільки для групових)
+            if etype == "group":
+                try:
+                    prev_rec = int(_gs_prev_state.get(event_key + ("rec",), row.get("records_count", 0)))
+                    cur_rec  = int(row.get("records_count", 0))
+                    delta = cur_rec - prev_rec
+                    зміна = f"+{delta}" if delta > 0 else (str(delta) if delta < 0 else "0")
+                    _gs_prev_state[event_key + ("rec",)] = cur_rec
+                except (TypeError, ValueError):
+                    зміна = ""
+            else:
+                зміна = "" if було == "—" or було == стало else ("↓ скасовано" if стало == "вільний" else "↑ зайнятий")
+
+            # Якщо нічого не змінилось — не додаємо рядок
+            if було != "—" and було == стало:
+                return
+
+        entry = [
+            row.get("checked_at", ""),
+            row.get("competitor", ""),
+            etype,
+            label,
+            row.get("slot_time", ""),
+            було,
+            стало,
+            зміна,
+        ]
+        _gs_status_rows.append(entry)
+        if len(_gs_status_rows) > STATUS_MAX_ROWS:
+            _gs_status_rows = _gs_status_rows[-STATUS_MAX_ROWS:]
+
+        sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
+        ws = _ensure_worksheet(sh, GOOGLE_SHEET_STATUS)
+
+        # Нові рядки зверху
+        data = [STATUS_HEADERS] + list(reversed(_gs_status_rows))
+        ws.clear()
+        ws.update(values=data, value_input_option="USER_ENTERED")
+    except Exception as e:
+        print(f"  [GSheets] Помилка оновлення Статус: {e}")
 
 
 def _collect_today_events():
@@ -520,6 +675,9 @@ def gs_update_individual_week():
                         initial = int(existing[1])
                     except (ValueError, TypeError):
                         initial = free
+                    # Тренер додала нові слоти — оновлюємо базу
+                    if isinstance(initial, int) and free > initial:
+                        initial = free
                 else:
                     initial = free  # перший скан — фіксуємо
 
@@ -556,6 +714,17 @@ def gs_update_individual_week():
             ws.append_rows(rows_to_append, value_input_option="RAW")
 
         print(f"  [GSheets] Індивідуальні (7 днів): оновлено {len(batch_updates)}, додано {len(rows_to_append)} рядків")
+        gs_update_status({
+            "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "competitor": "— всі студії —",
+            "event_type": "heartbeat",
+            "staff_name": "",
+            "event_name": f"щогодинний скан (оновлено {len(batch_updates)}, додано {len(rows_to_append)})",
+            "slot_time": "",
+            "records_count": "",
+            "places_left": "",
+            "status": "ок",
+        })
     except Exception as e:
         print(f"  [GSheets] Помилка оновлення Індивідуальні: {e}")
 
@@ -660,7 +829,7 @@ def _ws_upsert(ws, all_rows: list, headers: list, key_cols: list, new_rows: list
         key = tuple(_norm_key_val(row_data[i]) for i in key_col_positions)
         if key in row_index:
             row_num = row_index[key]
-            ws.update(f"A{row_num}", [row_data], value_input_option="RAW")
+            ws.update(range_name=f"A{row_num}", values=[row_data], value_input_option="RAW")
             updated += 1
         else:
             ws.append_row(row_data, value_input_option="RAW")
@@ -751,7 +920,7 @@ def gs_update_table():
         sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
         ws = sh.worksheet(GOOGLE_SHEET_TABLE)
         ws.clear()
-        ws.update(rows, value_input_option="USER_ENTERED")
+        ws.update(values=rows, value_input_option="USER_ENTERED")
         print(f"  [GSheets] Таблицю оновлено ({len(rows)-1} студій, {len(all_hours)} годин)")
     except Exception as e:
         print(f"  [GSheets] Помилка оновлення таблиці: {e}")
@@ -953,6 +1122,9 @@ def schedule_today(competitor) -> list:
               + ", ".join(s["time"] for s in slots))
 
         for slot in slots:
+            # Зберігаємо початковий стан для аркушу Статус
+            _gs_prev_state[(name, "individual", "", staff["name"], today, slot["time"])] = "вільний"
+
             delay = seconds_until(slot["time"], today, CHECK_BEFORE_MINUTES)
             if delay < 0:
                 print(f"    Пропуск {slot['time']} — вже минув")
@@ -999,6 +1171,11 @@ def schedule_today(competitor) -> list:
             print(f"  {event_time} | {event_name} | {staff_name} | "
                   f"{records}/{capacity} зайнято ({occupancy_pct}%) | "
                   f"вільних: {places_left}")
+
+            # Зберігаємо початковий стан для аркушу Статус
+            _ev_key = (name, "group", str(event["id"]), staff_name, today, event_time)
+            _gs_prev_state[_ev_key] = f"{records}/{capacity} ({occupancy_pct}%)"
+            _gs_prev_state[_ev_key + ("rec",)] = records
 
             delay = seconds_until(event_time, today, CHECK_BEFORE_MINUTES)
             if delay < 0:
