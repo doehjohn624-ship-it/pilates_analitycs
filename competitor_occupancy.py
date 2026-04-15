@@ -27,7 +27,7 @@ except ImportError:
 # НАЛАШТУВАННЯ
 # ========================
 
-TOKEN = "gtcwf654agufy25gsadh"
+TOKEN = ""  # Завантажується з config.json
 
 COMPETITORS = [
     {
@@ -92,13 +92,14 @@ def _extract_spreadsheet_id(url_or_id: str) -> str:
 
 def load_config():
     """Завантажити конфіг з config.json (якщо є)."""
-    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE, COMPETITORS
+    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE, COMPETITORS, TOKEN
     if not os.path.exists(CONFIG_FILE):
         return False
     with open(CONFIG_FILE, encoding="utf-8") as f:
         cfg = json.load(f)
     GOOGLE_SPREADSHEET_ID   = cfg.get("spreadsheet_id", "")
     GOOGLE_CREDENTIALS_FILE = cfg.get("credentials_file", "google_credentials.json")
+    TOKEN                   = cfg.get("altegio_token", "")
     saved = cfg.get("competitors")
     if saved:
         COMPETITORS = saved
@@ -114,6 +115,7 @@ def save_config():
         json.dump({
             "spreadsheet_id":   GOOGLE_SPREADSHEET_ID,
             "credentials_file": GOOGLE_CREDENTIALS_FILE,
+            "altegio_token":    TOKEN,
             "competitors": [
                 {"name": c["name"], "company_id": c["company_id"], "base_url": c["base_url"]}
                 for c in COMPETITORS
@@ -123,14 +125,27 @@ def save_config():
 
 def setup():
     """Інтерактивне налаштування при першому запуску."""
-    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE
+    global GOOGLE_SPREADSHEET_ID, GOOGLE_CREDENTIALS_FILE, TOKEN
 
     print("=" * 55)
     print("  ПЕРШИЙ ЗАПУСК — налаштування")
     print("=" * 55)
 
+    # ── 0. Altegio токен ──────────────────────────────────
+    print("\nКрок 1/5 — Altegio API токен")
+    print("  Токен можна знайти в URL віджету бронювання будь-якої студії.")
+    print("  Приклад: https://n1234567.alteg.io/?...token=XXXXX")
+    while True:
+        raw = input("  Вставте токен: ").strip()
+        if not raw:
+            print("  ! Не може бути порожнім, спробуйте ще раз.")
+            continue
+        TOKEN = raw
+        print(f"  ✓ Токен збережено")
+        break
+
     # ── 1. Google Таблиця ─────────────────────────────────
-    print("\nКрок 1/4 — Google Таблиця")
+    print("\nКрок 2/5 — Google Таблиця")
     print("Відкрийте таблицю в браузері та скопіюйте посилання.")
     while True:
         raw = input("  Вставте посилання (або ID): ").strip()
@@ -142,7 +157,7 @@ def setup():
         break
 
     # ── 2. Файл credentials ───────────────────────────────
-    print("\nКрок 2/4 — Файл Google credentials")
+    print("\nКрок 3/5 — Файл Google credentials")
     print("Де знаходиться ваш google_credentials.json?")
     print(f"  [Enter] — залишити поточний шлях: {GOOGLE_CREDENTIALS_FILE}")
     raw = input("  Шлях до файлу: ").strip()
@@ -166,7 +181,7 @@ def setup():
         print(f"  ✓ Файл знайдено: {GOOGLE_CREDENTIALS_FILE}")
 
     # ── 3. Конкуренти ────────────────────────────────────
-    print("\nКрок 3/4 — Список конкурентів")
+    print("\nКрок 4/5 — Список конкурентів")
     print(f"  Зараз у списку {len(COMPETITORS)} студій:")
     for i, c in enumerate(COMPETITORS, 1):
         print(f"    {i}. {c['name']}  (company_id={c['company_id']})")
@@ -212,7 +227,7 @@ def setup():
 
     # ── 4. Cron ───────────────────────────────────────────
     print()
-    print("Крок 4/4 — Автозапуск щодня о 06:00")
+    print("Крок 5/5 — Автозапуск щодня о 06:00")
     print("  Налаштувати cron щоб скрипт запускався автоматично?")
     answer = input("  [y/n]: ").strip().lower()
     if answer in ("y", "yes"):
