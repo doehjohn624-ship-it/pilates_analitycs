@@ -933,7 +933,7 @@ def gs_update_table():
             rows.append(row)
 
         sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
-        ws = sh.worksheet(GOOGLE_SHEET_TABLE)
+        ws = _ensure_worksheet(sh, GOOGLE_SHEET_TABLE)
         ws.clear()
         ws.update(values=rows, value_input_option="USER_ENTERED")
         print(f"  [GSheets] Таблицю оновлено ({len(rows)-1} студій, {len(all_hours)} годин)")
