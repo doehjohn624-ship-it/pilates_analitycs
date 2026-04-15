@@ -158,9 +158,12 @@ def setup():
 
     # ── 2. Файл credentials ───────────────────────────────
     print("\nКрок 3/5 — Файл Google credentials")
-    print("Де знаходиться ваш google_credentials.json?")
+    print("Вкажіть повний шлях до файлу включно з назвою файлу.")
+    print("  Приклади:")
+    print("    google_credentials.json               (файл у папці зі скриптом)")
+    print("    /home/user/downloads/my-project.json  (повний шлях)")
     print(f"  [Enter] — залишити поточний шлях: {GOOGLE_CREDENTIALS_FILE}")
-    raw = input("  Шлях до файлу: ").strip()
+    raw = input("  Шлях + назва файлу: ").strip()
     if raw:
         GOOGLE_CREDENTIALS_FILE = raw
 
