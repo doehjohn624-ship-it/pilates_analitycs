@@ -439,7 +439,7 @@ def gs_update_status(row: dict):
 
         if etype == "heartbeat":
             було = ""
-            стало = state_now
+            стало = ""
             зміна = ""
         else:
             event_key = (
